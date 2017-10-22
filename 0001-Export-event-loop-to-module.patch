@@ -1,6 +1,6 @@
-From 4a5f312b258d0aa761ffe8da04581bb3724298c1 Mon Sep 17 00:00:00 2001
-From: Xiaoguang Sun <sunxiaoguang@gmail.com>
-Date: Thu, 19 Oct 2017 21:39:52 +0800
+From f277f41ce04d3140ac18ec4526ee569a5208fe44 Mon Sep 17 00:00:00 2001
+From: Xiaoguang Sun <sunxiaoguang@zhihu.com>
+Date: Sun, 22 Oct 2017 20:24:24 +0800
 Subject: [PATCH] Export event loop to module
 
 Export event loop and certain networking related interfaces to module. A
@@ -8,15 +8,15 @@ demonstration module 'hellonet.c' is added to demonstrate how to use these new
 set of module interfaces to write event driven commands without resorting to
 extra thread.
 ---
- src/module.c           | 510 ++++++++++++++++++++++++++++++++++++-
+ src/module.c           | 515 ++++++++++++++++++++++++++++++++++++-
  src/modules/Makefile   |   7 +-
  src/modules/hellonet.c | 672 +++++++++++++++++++++++++++++++++++++++++++++++++
  src/redismodule.h      |  65 +++++
- 4 files changed, 1242 insertions(+), 12 deletions(-)
+ 4 files changed, 1247 insertions(+), 12 deletions(-)
  create mode 100644 src/modules/hellonet.c
 
 diff --git a/src/module.c b/src/module.c
-index fda68b2..3be84e9 100644
+index fda68b273..ea1fc8fc9 100644
 --- a/src/module.c
 +++ b/src/module.c
 @@ -39,14 +39,23 @@
@@ -146,7 +146,7 @@ index fda68b2..3be84e9 100644
  
      /* Unload the dynamic library. */
      if (dlclose(module->handle) == -1) {
-@@ -3817,6 +3860,428 @@ size_t moduleCount(void) {
+@@ -3817,6 +3860,433 @@ size_t moduleCount(void) {
      return dictSize(modules);
  }
  
@@ -155,6 +155,7 @@ index fda68b2..3be84e9 100644
 +
 +typedef struct RedisModuleFileEventData {
 +    RedisModule *module;
++    int mask;
 +    RedisModuleFileProc rproc;
 +    RedisModuleFileProc wproc;
 +    void *clientData;
@@ -169,11 +170,11 @@ index fda68b2..3be84e9 100644
 +    ctx.module = event->module;
 +    /* use module's client when no real one exist within this context */
 +    ctx.client = ctx.module->client;
-+    if (mask & AE_READABLE) {
++    if (event->mask & mask & AE_READABLE) {
 +        rfired = 1;
 +        event->rproc(&ctx,fd,event->clientData,mask);
 +    }
-+    if (mask & AE_WRITABLE) {
++    if (event->mask & mask & AE_WRITABLE) {
 +        if (!rfired || event->wproc != event->rproc)
 +            event->wproc(&ctx,fd,event->clientData,mask);
 +    }
@@ -181,7 +182,7 @@ index fda68b2..3be84e9 100644
 +}
 +
 +/* Create a file event watch for given event type, REDISMODULE_FILE_READABLE/REDISMODULE_FILE_WRITABLE
-+ * are supported at this time. Event callback will be dispatched when the file descriptor is readable 
++ * are supported at this time. Event callback will be dispatched when the file descriptor is readable
 + * or writable if corresponding event type is watched. */
 +int RM_CreateFileEvent(RedisModuleCtx *ctx, int fd, int mask, RedisModuleFileProc proc, void *clientData) {
 +    RedisModuleFileEventData *event;
@@ -203,17 +204,21 @@ index fda68b2..3be84e9 100644
 +        }
 +        return REDISMODULE_ERR;
 +    }
++    event->mask |= mask;
 +    return REDISMODULE_OK;
 +}
 +
 +/* Delete a previously watched file event handler */
 +void RM_DeleteFileEvent(RedisModuleCtx *ctx, int fd, int mask) {
++    RedisModuleFileEventData *event;
 +    REDISMODULE_NOT_USED(ctx);
 +    if ((aeGetFileEvents(server.el,fd) & mask) == 0) {
 +        return;
 +    }
 +    aeDeleteFileEvent(server.el,fd,mask);
-+    if (aeGetFileEvents(server.el,fd) == 0) {
++    event = server.el->events[fd].clientData;
++    event->mask = aeGetFileEvents(server.el,fd);
++    if (event->mask == 0) {
 +        zfree(server.el->events[fd].clientData);
 +    }
 +}
@@ -575,7 +580,7 @@ index fda68b2..3be84e9 100644
  /* Register all the APIs we export. Keep this function at the end of the
   * file so that's easy to seek it to add new entries. */
  void moduleRegisterCoreAPI(void) {
-@@ -3929,4 +4394,27 @@ void moduleRegisterCoreAPI(void) {
+@@ -3929,4 +4399,27 @@ void moduleRegisterCoreAPI(void) {
      REGISTER_API(DigestAddStringBuffer);
      REGISTER_API(DigestAddLongLong);
      REGISTER_API(DigestEndSequence);
@@ -604,7 +609,7 @@ index fda68b2..3be84e9 100644
 +    REGISTER_API(Detach);
  }
 diff --git a/src/modules/Makefile b/src/modules/Makefile
-index 066e65e..491cd3b 100644
+index 066e65e9b..491cd3b3d 100644
 --- a/src/modules/Makefile
 +++ b/src/modules/Makefile
 @@ -13,7 +13,7 @@ endif
@@ -630,7 +635,7 @@ index 066e65e..491cd3b 100644
  testmodule.so: testmodule.xo
 diff --git a/src/modules/hellonet.c b/src/modules/hellonet.c
 new file mode 100644
-index 0000000..f94770d
+index 000000000..f94770d63
 --- /dev/null
 +++ b/src/modules/hellonet.c
 @@ -0,0 +1,672 @@
@@ -1307,7 +1312,7 @@ index 0000000..f94770d
 +  return REDISMODULE_OK;
 +}
 diff --git a/src/redismodule.h b/src/redismodule.h
-index 7fc0fec..f2a89ed 100644
+index 7fc0fec40..f2a89ed00 100644
 --- a/src/redismodule.h
 +++ b/src/redismodule.h
 @@ -58,6 +58,16 @@
@@ -1404,5 +1409,5 @@ index 7fc0fec..f2a89ed 100644
  
      RedisModule_SetModuleAttribs(ctx,name,ver,apiver);
 -- 
-2.1.4
+2.13.5 (Apple Git-94)
 
