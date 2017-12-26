@@ -1,0 +1,86 @@
+From 9717430d9b9e5f5d2fc7a65f89a6dd53c9e2b2d3 Mon Sep 17 00:00:00 2001
+From: Xiaoguang Sun <sunxiaoguang@zhihu.com>
+Date: Sun, 24 Dec 2017 23:25:19 +0800
+Subject: [PATCH] Add snapshot command to do sync only
+
+Add snapshot command to do sync without propagating mutations
+---
+ src/replication.c | 14 ++++++++++++++
+ src/server.c      |  1 +
+ src/server.h      |  2 ++
+ 3 files changed, 17 insertions(+)
+
+diff --git a/src/replication.c b/src/replication.c
+index cf4db3e3a..1885051e3 100644
+--- a/src/replication.c
++++ b/src/replication.c
+@@ -258,6 +258,9 @@ void replicationFeedSlaves(list *slaves, int dictid, robj **argv, int argc) {
+         /* Don't feed slaves that are still waiting for BGSAVE to start */
+         if (slave->replstate == SLAVE_STATE_WAIT_BGSAVE_START) continue;
+ 
++        /* Don't feed slaves that only require snapshot */
++        if (slave->flags & CLIENT_SLAVE_SNAPSHOT) continue;
++
+         /* Feed slaves that are waiting for the initial SYNC (so these commands
+          * are queued in the output buffer until the initial SYNC completes),
+          * or are already in sync with the master. */
+@@ -623,6 +626,11 @@ int startBgsaveForReplication(int mincapa) {
+     return retval;
+ }
+ 
++void snapshotCommand(client *c) {
++  c->flags |= CLIENT_SLAVE_SNAPSHOT;
++  syncCommand(c);
++}
++
+ /* SYNC and PSYNC command implemenation. */
+ void syncCommand(client *c) {
+     /* ignore SYNC if already slave or in monitor mode */
+@@ -856,6 +864,12 @@ void putSlaveOnline(client *slave) {
+     slave->replstate = SLAVE_STATE_ONLINE;
+     slave->repl_put_online_on_ack = 0;
+     slave->repl_ack_time = server.unixtime; /* Prevent false timeout. */
++    /* slave only requires a snapshot, close the connection to finish */
++    if (slave->flags & CLIENT_SLAVE_SNAPSHOT) {
++        serverLog(LL_NOTICE,"Sending snapshot to slave %s succeeded", replicationGetSlaveName(slave));
++        freeClient(slave);
++        return;
++    }
+     if (aeCreateFileEvent(server.el, slave->fd, AE_WRITABLE,
+         sendReplyToClient, slave) == AE_ERR) {
+         serverLog(LL_WARNING,"Unable to register writable event for slave bulk transfer: %s", strerror(errno));
+diff --git a/src/server.c b/src/server.c
+index 7498a25fd..8c6eef425 100644
+--- a/src/server.c
++++ b/src/server.c
+@@ -247,6 +247,7 @@ struct redisCommand redisCommandTable[] = {
+     {"sync",syncCommand,1,"ars",0,NULL,0,0,0,0,0},
+     {"psync",syncCommand,3,"ars",0,NULL,0,0,0,0,0},
+     {"replconf",replconfCommand,-1,"aslt",0,NULL,0,0,0,0,0},
++    {"snapshot",snapshotCommand,1,"ars",0,NULL,0,0,0,0,0},
+     {"flushdb",flushdbCommand,-1,"w",0,NULL,0,0,0,0,0},
+     {"flushall",flushallCommand,-1,"w",0,NULL,0,0,0,0,0},
+     {"sort",sortCommand,-2,"wm",0,sortGetKeys,1,1,1,0,0},
+diff --git a/src/server.h b/src/server.h
+index 931734dde..f47a8df62 100644
+--- a/src/server.h
++++ b/src/server.h
+@@ -248,6 +248,7 @@ typedef long long mstime_t; /* millisecond time type. */
+ #define CLIENT_LUA_DEBUG (1<<25)  /* Run EVAL in debug mode. */
+ #define CLIENT_LUA_DEBUG_SYNC (1<<26)  /* EVAL debugging without fork() */
+ #define CLIENT_MODULE (1<<27) /* Non connected client used by some module. */
++#define CLIENT_SLAVE_SNAPSHOT (1<<28) /* The client is a slave instance that only require a snapshot */
+ 
+ /* Client block type (btype field in client structure)
+  * if CLIENT_BLOCKED flag is set. */
+@@ -1880,6 +1881,7 @@ void sdiffCommand(client *c);
+ void sdiffstoreCommand(client *c);
+ void sscanCommand(client *c);
+ void syncCommand(client *c);
++void snapshotCommand(client *c);
+ void flushdbCommand(client *c);
+ void flushallCommand(client *c);
+ void sortCommand(client *c);
+-- 
+2.14.3 (Apple Git-98)
+

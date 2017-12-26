@@ -1,0 +1,130 @@
+From 63e9c799396dfc3d6534abbfcd4367baff6425f9 Mon Sep 17 00:00:00 2001
+From: Xiaoguang Sun <sunxiaoguang@zhihu.com>
+Date: Sat, 23 Dec 2017 12:33:04 +0800
+Subject: [PATCH] Export HashGetAll to module
+
+---
+ src/module.c      | 64 +++++++++++++++++++++++++++++++++++++++++++++++++++++++
+ src/redismodule.h |  3 +++
+ 2 files changed, 67 insertions(+)
+
+diff --git a/src/module.c b/src/module.c
+index 0e56a123c..e040ddad6 100644
+--- a/src/module.c
++++ b/src/module.c
+@@ -167,6 +167,7 @@ typedef struct RedisModuleKey RedisModuleKey;
+ /* Function pointer type of a function representing a command inside
+  * a Redis module. */
+ typedef int (*RedisModuleCmdFunc) (RedisModuleCtx *ctx, void **argv, int argc);
++typedef void (*RedisModuleHashItemFunc)(const char **key, int32_t *ksize, const char **value, int32_t *vsize, int32_t num, void *privdata);
+ 
+ /* This struct holds the information about a command registered by a module.*/
+ struct RedisModuleCommandProxy {
+@@ -2290,6 +2291,68 @@ int RM_HashGet(RedisModuleKey *key, int flags, ...) {
+     return REDISMODULE_OK;
+ }
+ 
++struct genericHgetallContext {
++    RedisModuleHashItemFunc func;
++    void *privdata;
++};
++
++static void genericHgetallHashTable(void *privdata, const dictEntry **entries, const int size) {
++    struct genericHgetallContext *ctx = privdata;
++    int idx;
++    int32_t klen[16], vlen[16];
++    sds keys[16], values[16];
++    for (idx = 0; idx < size; ++idx) {
++        const dictEntry *de = entries[idx];
++        keys[idx] = dictGetKey(de);
++        values[idx] = dictGetVal(de);
++        klen[idx] = sdslen(keys[idx]);
++        vlen[idx] = sdslen(values[idx]);
++    }
++    ctx->func((const char **)keys,klen,(const char **)values,vlen,size,ctx->privdata);
++}
++
++int RM_HashGetAll(RedisModuleKey *key, RedisModuleHashItemFunc func, void *privdata) {
++    robj *o = key->value;
++    if (o && o->type != OBJ_HASH) return REDISMODULE_ERR;
++
++    if (o->encoding == OBJ_ENCODING_ZIPLIST) {
++        hashTypeIterator *hi = hashTypeInitIterator(o);
++        int32_t klen, vlen;
++        char *key, *value;
++        char kbuffer[32], vbuffer[32];
++        while (hashTypeNext(hi) != C_ERR) {
++            unsigned char *kvstr = NULL, *vvstr = NULL;
++            unsigned int kvlen = UINT_MAX, vvlen = UINT_MAX;
++            long long kvll = LLONG_MAX, vvll = LLONG_MAX;
++            hashTypeCurrentFromZiplist(hi, OBJ_HASH_KEY, &kvstr, &kvlen, &kvll);
++            if (kvstr) {
++                klen = kvlen;
++                key = (char *) kvstr;
++            } else {
++                klen = snprintf(kbuffer, sizeof(kbuffer), "%lld", kvll);
++                key = kbuffer;
++            }
++            hashTypeCurrentFromZiplist(hi, OBJ_HASH_VALUE, &vvstr, &vvlen, &vvll);
++            if (vvstr) {
++                vlen = vvlen;
++                value = (char *) vvstr;
++            } else {
++                vlen = snprintf(vbuffer, sizeof(vbuffer), "%lld", vvll);
++                value = vbuffer;
++            }
++            func((const char **)&key,&klen,(const char **)&value,&vlen,1,privdata);
++        }
++        hashTypeReleaseIterator(hi);
++    } else if (o->encoding == OBJ_ENCODING_HT) {
++        struct genericHgetallContext ctx = {func, privdata};
++        dictEach(o->ptr,genericHgetallHashTable,&ctx);
++    } else {
++        serverPanic("Unknown hash encoding");
++    }
++
++    /* Cleanup */
++    return REDISMODULE_OK;
++}
+ /* --------------------------------------------------------------------------
+  * Redis <-> Modules generic Call() API
+  * -------------------------------------------------------------------------- */
+@@ -4446,6 +4509,7 @@ void moduleRegisterCoreAPI(void) {
+     REGISTER_API(ZsetRangeEndReached);
+     REGISTER_API(HashSet);
+     REGISTER_API(HashGet);
++    REGISTER_API(HashGetAll);
+     REGISTER_API(IsKeysPositionRequest);
+     REGISTER_API(KeyAtPos);
+     REGISTER_API(GetClientId);
+diff --git a/src/redismodule.h b/src/redismodule.h
+index a139c410a..41813b0bd 100644
+--- a/src/redismodule.h
++++ b/src/redismodule.h
+@@ -128,6 +128,7 @@ typedef void (*RedisModuleTypeRewriteFunc)(RedisModuleIO *aof, RedisModuleString
+ typedef size_t (*RedisModuleTypeMemUsageFunc)(const void *value);
+ typedef void (*RedisModuleTypeDigestFunc)(RedisModuleDigest *digest, void *value);
+ typedef void (*RedisModuleTypeFreeFunc)(void *value);
++typedef void (*RedisModuleHashItemFunc)(const char **key, int32_t *ksize, const char **value, int32_t *vsize, int32_t num, void *privdata);
+ 
+ #ifdef REDISMODULE_EXPERIMENTAL_API
+ typedef void (*RedisModuleFinalizer)(RedisModuleCtx *context, void *clientData);
+@@ -221,6 +222,7 @@ int REDISMODULE_API_FUNC(RedisModule_ZsetRangePrev)(RedisModuleKey *key);
+ int REDISMODULE_API_FUNC(RedisModule_ZsetRangeEndReached)(RedisModuleKey *key);
+ int REDISMODULE_API_FUNC(RedisModule_HashSet)(RedisModuleKey *key, int flags, ...);
+ int REDISMODULE_API_FUNC(RedisModule_HashGet)(RedisModuleKey *key, int flags, ...);
++int REDISMODULE_API_FUNC(RedisModule_HashGetAll)(RedisModuleKey *key, RedisModuleHashItemFunc func, void *privdata);
+ int REDISMODULE_API_FUNC(RedisModule_IsKeysPositionRequest)(RedisModuleCtx *ctx);
+ void REDISMODULE_API_FUNC(RedisModule_KeyAtPos)(RedisModuleCtx *ctx, int pos);
+ unsigned long long REDISMODULE_API_FUNC(RedisModule_GetClientId)(RedisModuleCtx *ctx);
+@@ -366,6 +368,7 @@ static int RedisModule_Init(RedisModuleCtx *ctx, const char *name, int ver, int
+     REDISMODULE_GET_API(ZsetRangeEndReached);
+     REDISMODULE_GET_API(HashSet);
+     REDISMODULE_GET_API(HashGet);
++    REDISMODULE_GET_API(HashGetAll);
+     REDISMODULE_GET_API(IsKeysPositionRequest);
+     REDISMODULE_GET_API(KeyAtPos);
+     REDISMODULE_GET_API(GetClientId);
+-- 
+2.14.3 (Apple Git-98)
+
