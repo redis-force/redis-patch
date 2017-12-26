@@ -1,0 +1,171 @@
+From 1d678fafd28154ba08a7e1530186324b6ed0f282 Mon Sep 17 00:00:00 2001
+From: Xiaoguang Sun <sunxiaoguang@zhihu.com>
+Date: Tue, 26 Dec 2017 13:23:08 +0800
+Subject: [PATCH] Optimize hgetall for large hash table
+
+---
+ src/dict.c   | 31 ++++++++++++++++++++++++++++++
+ src/dict.h   |  2 ++
+ src/t_hash.c | 62 ++++++++++++++++++++++++++++++++++++++++++++++++------------
+ 3 files changed, 83 insertions(+), 12 deletions(-)
+
+diff --git a/src/dict.c b/src/dict.c
+index 97e6368..b13aa99 100644
+--- a/src/dict.c
++++ b/src/dict.c
+@@ -68,6 +68,7 @@ static int _dictExpandIfNeeded(dict *ht);
+ static unsigned long _dictNextPower(unsigned long size);
+ static long _dictKeyIndex(dict *ht, const void *key, uint64_t hash, dictEntry **existing);
+ static int _dictInit(dict *ht, dictType *type, void *privDataPtr);
++static void _dictEach(dictht *ht, dictEachFunction *fn, void *privdata);
+ 
+ /* -------------------------- hash functions -------------------------------- */
+ 
+@@ -911,6 +912,13 @@ unsigned long dictScan(dict *d,
+     return v;
+ }
+ 
++void dictEach(dict *d, dictEachFunction *fn, void *privdata)
++{
++    if (dictSize(d) == 0) return;
++    _dictEach(&d->ht[0],fn,privdata);
++    _dictEach(&d->ht[1],fn,privdata);
++}
++
+ /* ------------------------- private functions ------------------------------ */
+ 
+ /* Expand the hash table if needed */
+@@ -980,6 +988,29 @@ static long _dictKeyIndex(dict *d, const void *key, uint64_t hash, dictEntry **e
+     return idx;
+ }
+ 
++static void _dictEach(dictht *ht, dictEachFunction *fn, void *privdata)
++{
++    int sz = 0;
++    unsigned long left = ht->used;
++    const dictEntry *buffer[16];
++    dictEntry **pos = ht->table, **end = ht->table + ht->size;
++    for (; pos < end && left > 0; ++pos) {
++        const dictEntry *he = *pos;
++        while (he) {
++            buffer[sz++] = he;
++            if (sz == sizeof(buffer) / sizeof(buffer[0])) {
++                fn(privdata,buffer,sz);
++                sz = 0;
++            }
++            left--;
++            he = he->next;
++        }
++    }
++    if (sz > 0) {
++        fn(privdata,buffer,sz);
++    }
++}
++
+ void dictEmpty(dict *d, void(callback)(void*)) {
+     _dictClear(d,&d->ht[0],callback);
+     _dictClear(d,&d->ht[1],callback);
+diff --git a/src/dict.h b/src/dict.h
+index 62018cc..5d2f9ef 100644
+--- a/src/dict.h
++++ b/src/dict.h
+@@ -96,6 +96,7 @@ typedef struct dictIterator {
+ 
+ typedef void (dictScanFunction)(void *privdata, const dictEntry *de);
+ typedef void (dictScanBucketFunction)(void *privdata, dictEntry **bucketref);
++typedef void (dictEachFunction)(void *privdata, const dictEntry **entries, const int number);
+ 
+ /* This is the initial size of every hash table */
+ #define DICT_HT_INITIAL_SIZE     4
+@@ -178,6 +179,7 @@ int dictRehashMilliseconds(dict *d, int ms);
+ void dictSetHashFunctionSeed(uint8_t *seed);
+ uint8_t *dictGetHashFunctionSeed(void);
+ unsigned long dictScan(dict *d, unsigned long v, dictScanFunction *fn, dictScanBucketFunction *bucketfn, void *privdata);
++void dictEach(dict *d, dictEachFunction *fn, void *privdata);
+ uint64_t dictGetHash(dict *d, const void *key);
+ dictEntry **dictFindEntryRefByPtrAndHash(dict *d, const void *oldptr, uint64_t hash);
+ 
+diff --git a/src/t_hash.c b/src/t_hash.c
+index be73932..ea980bc 100644
+--- a/src/t_hash.c
++++ b/src/t_hash.c
+@@ -763,6 +763,36 @@ static void addHashIteratorCursorToReply(client *c, hashTypeIterator *hi, int wh
+     }
+ }
+ 
++struct genericHgetallContext {
++    int flags;
++    int count;
++    client *c;
++};
++
++static void genericHgetallHashTable(void *privdata, const dictEntry **entries, const int size) {
++    struct genericHgetallContext *ctx = privdata;
++    int idx, flags = ctx->flags;
++    client *c = ctx->c;
++    sds value;
++    for (idx = 0; idx < size; ++idx) {
++        const dictEntry *de = entries[idx];
++        if (flags & OBJ_HASH_KEY) {
++            value = dictGetKey(de);
++            addReplyBulkCBuffer(c, value, sdslen(value));
++        }
++        if (flags & OBJ_HASH_VALUE) {
++            value = dictGetVal(de);
++            addReplyBulkCBuffer(c, value, sdslen(value));
++        }
++    }
++    if (flags & OBJ_HASH_KEY) {
++        ctx->count += size;
++    }
++    if (flags & OBJ_HASH_VALUE) {
++        ctx->count += size;
++    }
++}
++
+ void genericHgetallCommand(client *c, int flags) {
+     robj *o;
+     hashTypeIterator *hi;
+@@ -778,19 +808,27 @@ void genericHgetallCommand(client *c, int flags) {
+     length = hashTypeLength(o) * multiplier;
+     addReplyMultiBulkLen(c, length);
+ 
+-    hi = hashTypeInitIterator(o);
+-    while (hashTypeNext(hi) != C_ERR) {
+-        if (flags & OBJ_HASH_KEY) {
+-            addHashIteratorCursorToReply(c, hi, OBJ_HASH_KEY);
+-            count++;
+-        }
+-        if (flags & OBJ_HASH_VALUE) {
+-            addHashIteratorCursorToReply(c, hi, OBJ_HASH_VALUE);
+-            count++;
+-        }
+-    }
++    if (o->encoding == OBJ_ENCODING_ZIPLIST) {
++        hi = hashTypeInitIterator(o);
++        while (hashTypeNext(hi) != C_ERR) {
++            if (flags & OBJ_HASH_KEY) {
++                addHashIteratorCursorToReply(c, hi, OBJ_HASH_KEY);
++                count++;
++            }
++            if (flags & OBJ_HASH_VALUE) {
++                addHashIteratorCursorToReply(c, hi, OBJ_HASH_VALUE);
++                count++;
++            }
++         }
+ 
+-    hashTypeReleaseIterator(hi);
++        hashTypeReleaseIterator(hi);
++    } else if (o->encoding == OBJ_ENCODING_HT) {
++        struct genericHgetallContext ctx = {flags, 0, c};
++        dictEach(o->ptr,genericHgetallHashTable,&ctx);
++        count = ctx.count;
++    } else {
++        serverPanic("Unknown hash encoding");
++    }
+     serverAssert(count == length);
+ }
+ 
+-- 
+2.7.4
+
