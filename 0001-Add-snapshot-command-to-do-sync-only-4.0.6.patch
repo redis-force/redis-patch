@@ -43,7 +43,7 @@ index cf4db3e3a..1885051e3 100644
 +    /* slave only requires a snapshot, close the connection to finish */
 +    if (slave->flags & CLIENT_SLAVE_SNAPSHOT) {
 +        serverLog(LL_NOTICE,"Sending snapshot to slave %s succeeded", replicationGetSlaveName(slave));
-+        freeClient(slave);
++        freeClientAsync(slave);
 +        return;
 +    }
      if (aeCreateFileEvent(server.el, slave->fd, AE_WRITABLE,
