@@ -1,6 +1,6 @@
-From f277f41ce04d3140ac18ec4526ee569a5208fe44 Mon Sep 17 00:00:00 2001
+From 1c1d9135e3caea2e17cded976b79b384b157a6bc Mon Sep 17 00:00:00 2001
 From: Xiaoguang Sun <sunxiaoguang@zhihu.com>
-Date: Sun, 22 Oct 2017 20:24:24 +0800
+Date: Sun, 7 Jan 2018 19:18:33 +0800
 Subject: [PATCH] Export event loop to module
 
 Export event loop and certain networking related interfaces to module. A
@@ -16,7 +16,7 @@ extra thread.
  create mode 100644 src/modules/hellonet.c
 
 diff --git a/src/module.c b/src/module.c
-index fda68b273..ea1fc8fc9 100644
+index fda68b273..b0564581a 100644
 --- a/src/module.c
 +++ b/src/module.c
 @@ -39,14 +39,23 @@
@@ -163,19 +163,19 @@ index fda68b273..ea1fc8fc9 100644
 +
 +void moduleFileProc(struct aeEventLoop *eventLoop, int fd, void *clientData, int mask)
 +{
-+    int rfired = 0;
 +    RedisModuleFileEventData *event = clientData;
 +    RedisModuleCtx ctx = REDISMODULE_CTX_INIT;
++    int rfired = 0, event_mask = event->mask;
 +    REDISMODULE_NOT_USED(eventLoop);
 +    ctx.module = event->module;
 +    /* use module's client when no real one exist within this context */
 +    ctx.client = ctx.module->client;
-+    if (event->mask & mask & AE_READABLE) {
++    if (event_mask & mask & AE_READABLE) {
 +        rfired = 1;
 +        event->rproc(&ctx,fd,event->clientData,mask);
 +    }
-+    if (event->mask & mask & AE_WRITABLE) {
-+        if (!rfired || event->wproc != event->rproc)
++    if (event_mask & mask & AE_WRITABLE) {
++        if (!rfired || (event->wproc && event->wproc != event->rproc))
 +            event->wproc(&ctx,fd,event->clientData,mask);
 +    }
 +    moduleFreeContext(&ctx);
@@ -1409,5 +1409,5 @@ index 7fc0fec40..f2a89ed00 100644
  
      RedisModule_SetModuleAttribs(ctx,name,ver,apiver);
 -- 
-2.13.5 (Apple Git-94)
+2.14.3 (Apple Git-98)
 

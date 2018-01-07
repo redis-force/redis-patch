@@ -1,6 +1,6 @@
-From d44bca056fc14c93a8d43e5842de367ef3ff4baa Mon Sep 17 00:00:00 2001
+From d8331289e6ee9ca0530175695cff2d6a5c670c8d Mon Sep 17 00:00:00 2001
 From: Xiaoguang Sun <sunxiaoguang@zhihu.com>
-Date: Sat, 23 Dec 2017 11:22:34 +0800
+Date: Sun, 7 Jan 2018 19:23:31 +0800
 Subject: [PATCH] Export event loop to module
 
 Export event loop and certain networking related interfaces to module. A
@@ -16,7 +16,7 @@ extra thread.
  create mode 100644 src/modules/hellonet.c
 
 diff --git a/src/module.c b/src/module.c
-index 8a4c40f12..0e56a123c 100644
+index 8a4c40f12..927a71686 100644
 --- a/src/module.c
 +++ b/src/module.c
 @@ -39,14 +39,23 @@
@@ -64,7 +64,7 @@ index 8a4c40f12..0e56a123c 100644
 +void RM_LogRawWithLevel(RedisModule *module, int level, const char *fmt, va_list ap) {
 +     char msg[LOG_MAX_LEN];
 +     size_t name_len;
-+ 
++
 +    name_len = snprintf(msg,sizeof(msg),"<%s> ",module->name);
 +    vsnprintf(msg+name_len,sizeof(msg)-name_len,fmt,ap);
 +    serverLogRaw(level,msg);
@@ -157,18 +157,18 @@ index 8a4c40f12..0e56a123c 100644
 +
 +void moduleFileProc(struct aeEventLoop *eventLoop, int fd, void *clientData, int mask)
 +{
-+    int rfired = 0;
 +    RedisModuleFileEventData *event = clientData;
 +    RedisModuleCtx ctx = REDISMODULE_CTX_INIT;
++    int rfired = 0, event_mask = event->mask;
 +    REDISMODULE_NOT_USED(eventLoop);
 +    ctx.module = event->module;
 +    /* use module's client when no real one exist within this context */
 +    ctx.client = ctx.module->client;
-+    if (event->mask & mask & AE_READABLE) {
++    if (event_mask & mask & AE_READABLE) {
 +        rfired = 1;
 +        event->rproc(&ctx,fd,event->clientData,mask);
 +    }
-+    if (event->mask & mask & AE_WRITABLE) {
++    if (event_mask & mask & AE_WRITABLE) {
 +        if (!rfired || event->wproc != event->rproc)
 +            event->wproc(&ctx,fd,event->clientData,mask);
 +    }
