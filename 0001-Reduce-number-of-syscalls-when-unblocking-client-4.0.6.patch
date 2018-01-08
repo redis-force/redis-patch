@@ -1,0 +1,50 @@
+From f03fe1eb893a3ed9a4f4725d1612fcf5858659b7 Mon Sep 17 00:00:00 2001
+From: Xiaoguang Sun <sunxiaoguang@zhihu.com>
+Date: Mon, 8 Jan 2018 15:46:13 +0800
+Subject: [PATCH] Reduce number of syscalls when unblocking client
+
+---
+ src/module.c | 12 +++++++++---
+ 1 file changed, 9 insertions(+), 3 deletions(-)
+
+diff --git a/src/module.c b/src/module.c
+index 8a4c40f..dad84a9 100644
+--- a/src/module.c
++++ b/src/module.c
+@@ -211,6 +211,7 @@ typedef struct RedisModuleBlockedClient {
+ 
+ static pthread_mutex_t moduleUnblockedClientsMutex = PTHREAD_MUTEX_INITIALIZER;
+ static list *moduleUnblockedClients;
++static int moduleUnblockClientNotified = 0;
+ 
+ /* We need a mutex that is unlocked / relocked in beforeSleep() in order to
+  * allow thread safe contexts to execute commands at a safe moment. */
+@@ -3459,8 +3460,11 @@ int RM_UnblockClient(RedisModuleBlockedClient *bc, void *privdata) {
+     pthread_mutex_lock(&moduleUnblockedClientsMutex);
+     bc->privdata = privdata;
+     listAddNodeTail(moduleUnblockedClients,bc);
+-    if (write(server.module_blocked_pipe[1],"A",1) != 1) {
++    if (moduleUnblockClientNotified == 0) {
++      if (write(server.module_blocked_pipe[1],"A",1) != 1) {
+         /* Ignore the error, this is best-effort. */
++      }
++      moduleUnblockClientNotified = 1;
+     }
+     pthread_mutex_unlock(&moduleUnblockedClientsMutex);
+     return REDISMODULE_OK;
+@@ -3488,8 +3492,10 @@ void moduleHandleBlockedClients(void) {
+     pthread_mutex_lock(&moduleUnblockedClientsMutex);
+     /* Here we unblock all the pending clients blocked in modules operations
+      * so we can read every pending "awake byte" in the pipe. */
+-    char buf[1];
+-    while (read(server.module_blocked_pipe[0],buf,1) == 1);
++    char buf[128];
++    int rd;
++    while ((rd = read(server.module_blocked_pipe[0],buf,128)) > 0 && rd == 128);
++    moduleUnblockClientNotified = 0;
+     while (listLength(moduleUnblockedClients)) {
+         ln = listFirst(moduleUnblockedClients);
+         bc = ln->value;
+-- 
+2.7.4
+
